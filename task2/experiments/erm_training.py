@@ -19,7 +19,7 @@ PATIENCE = 5
 LR = 1e-4
 WEIGHT_DECAY = 1e-4
 
-DATA_ROOT = "task2/data/PACS"
+DATA_ROOT = "common/datasets/PACS"
 
 DEVICE = torch.device(
     "cuda" if torch.cuda.is_available() else "cpu"
@@ -323,7 +323,7 @@ def main():
     best_epoch = -1
     epochs_without_improvement = 0
 
-    os.makedirs("task2/checkpoints", exist_ok=True)
+    os.makedirs("task2/models", exist_ok=True)
 
     for epoch in range(1, NUM_EPOCHS + 1):
 
@@ -384,7 +384,7 @@ def main():
                     "optimizer_state_dict": optimizer.state_dict(),
                     "mean_source_macro_f1": mean_f1
                 },
-                "task2/checkpoints/erm_best.pt"
+                "task2/models/erm_best.pt"
             )
 
             print("  -> Best checkpoint saved")
@@ -409,3 +409,6 @@ def main():
         f"Best mean source Macro-F1: "
         f"{best_mean_f1:.4f}"
     )
+
+if __name__ == "__main__":
+    main()

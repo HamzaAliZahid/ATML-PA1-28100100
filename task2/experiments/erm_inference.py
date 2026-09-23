@@ -9,8 +9,8 @@ SEED = 6304
 NUM_CLASSES = 7
 BATCH_SIZE = 32
 
-DATA_ROOT = "task2/data/PACS"
-CHECKPOINT = "task2/checkpoints/erm_best.pt"
+DATA_ROOT = "common/datasets/PACS"
+CHECKPOINT = "task2/models/erm_best.pt"
 
 DEVICE = torch.device(
     "cuda" if torch.cuda.is_available()
@@ -40,7 +40,6 @@ sketch_loader = DataLoader(
     sketch_dataset,
     batch_size=BATCH_SIZE,
     shuffle=False,
-    num_workers=4,
     pin_memory=True
 )
 
@@ -58,7 +57,8 @@ model.fc = nn.Linear(
 
 checkpoint = torch.load(
     CHECKPOINT,
-    map_location=DEVICE
+    map_location=DEVICE,
+    weights_only = False
 )
 
 model.load_state_dict(

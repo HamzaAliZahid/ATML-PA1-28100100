@@ -4,11 +4,10 @@ import matplotlib.pyplot as plt
 lambda_values = [0.1, 1.0, 10.0]
 
 target_accuracy = [
-    0.00,  
-    0.00,  
-    0.00   
+    0.7427,
+    0.7878,
+    0.1300
 ]
-
 
 plt.figure(figsize=(7, 5))
 

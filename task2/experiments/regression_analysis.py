@@ -16,12 +16,12 @@ from sklearn.metrics import accuracy_score
 SEED = 6304
 NUM_CLASSES = 7
 
-DATA_ROOT = "task2/data/PACS"
+DATA_ROOT = "common/datasets/PACS"
 
-ERM_CHECKPOINT = "task2/checkpoints/pt"
-DAN_CHECKPOINT = "task2/checkpoints/pt"
-DANN_CHECKPOINT = "task2/checkpoints/pt"
-CDAN_CHECKPOINT = "task2/checkpoints/pt"
+ERM_CHECKPOINT = "task2/models/erm_best.pt"
+DAN_CHECKPOINT = "task2/models/dan_best.pt"
+DANN_CHECKPOINT = "task2/models/dann_best.pt"
+CDAN_CHECKPOINT = "task2/models/cdan_best.pt"
 
 device = torch.device(
     "cuda" if torch.cuda.is_available()
@@ -205,14 +205,81 @@ class CDAN(nn.Module):
         return features, class_logits
 
 
+def convert_resnet_state_dict(state_dict):
+
+    mapping = {
+        "conv1.": "features.0.",
+        "bn1.": "features.1.",
+        "layer1.": "features.4.",
+        "layer2.": "features.5.",
+        "layer3.": "features.6.",
+        "layer4.": "features.7.",
+        "fc.": "classifier."
+    }
+
+    converted = {}
+
+    for key, value in state_dict.items():
+
+        new_key = key
+
+        for old_prefix, new_prefix in mapping.items():
+
+            if key.startswith(old_prefix):
+
+                new_key = (
+                    new_prefix
+                    + key[len(old_prefix):]
+                )
+
+                break
+
+        converted[new_key] = value
+
+    return converted
+
+
 def load_model(model, checkpoint_path):
 
-    model.load_state_dict(
-        torch.load(
-            checkpoint_path,
-            map_location=device
-        )
+    checkpoint = torch.load(
+        checkpoint_path,
+        map_location=device,
+        weights_only=False
     )
+
+    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+
+        state_dict = checkpoint["model_state_dict"]
+
+    else:
+
+        state_dict = checkpoint
+
+    model_keys = set(
+        model.state_dict().keys()
+    )
+
+    checkpoint_keys = set(
+        state_dict.keys()
+    )
+
+    if checkpoint_keys.issubset(model_keys):
+
+        model.load_state_dict(
+            state_dict,
+            strict=False
+        )
+
+    else:
+
+        converted_state_dict = convert_resnet_state_dict(
+            state_dict
+        )
+
+        model.load_state_dict(
+            converted_state_dict,
+            strict=False
+        )
 
     model.to(device)
 
@@ -221,8 +288,7 @@ def load_model(model, checkpoint_path):
 
 def extract_features(
     model,
-    loader,
-    model_name
+    loader
 ):
 
     model.eval()
@@ -235,13 +301,9 @@ def extract_features(
 
             images = images.to(device)
 
-            if model_name == "ERM":
-
-                features = model.features(images)
-
-            else:
-
-                features = model.features(images)
+            features = model.features(
+                images
+            )
 
             features = torch.flatten(
                 features,
@@ -291,13 +353,15 @@ def main():
     source_loader = DataLoader(
         source_dataset,
         batch_size=32,
-        shuffle=False
+        shuffle=False,
+        num_workers=0
     )
 
     sketch_loader = DataLoader(
         sketch,
         batch_size=32,
-        shuffle=False
+        shuffle=False,
+        num_workers=0
     )
 
     models_to_evaluate = {
@@ -339,14 +403,12 @@ def main():
 
         source_features = extract_features(
             model,
-            source_loader,
-            name
+            source_loader
         )
 
         target_features = extract_features(
             model,
-            sketch_loader,
-            name
+            sketch_loader
         )
 
         num_samples = min(
@@ -424,3 +486,7 @@ def main():
             f"{name}: {score:.4f} "
             f"({score * 100:.2f}%)"
         )
+
+
+if __name__ == "__main__":
+    main()

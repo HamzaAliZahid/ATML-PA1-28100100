@@ -24,8 +24,8 @@ PATIENCE = 5
 LR = 1e-4
 WEIGHT_DECAY = 1e-4
 
-DATA_ROOT = "task2/data/PACS"
-CHECKPOINT_PATH = "task2/checkpoints/cdan_best.pt"
+DATA_ROOT = "common/datasets/PACS"
+CHECKPOINT_PATH = "task2/models/cdan_best.pt"
 
 device = torch.device(
     "cuda" if torch.cuda.is_available()
@@ -716,3 +716,6 @@ def main():
         f"Saved checkpoint to: "
         f"{CHECKPOINT_PATH}"
     )
+
+if __name__ == "__main__":
+    main()

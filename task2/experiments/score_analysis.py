@@ -4,7 +4,6 @@ import numpy as np
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from torch.utils.data import DataLoader, Subset
 from torchvision import datasets, transforms, models
@@ -14,12 +13,12 @@ from sklearn.model_selection import train_test_split
 SEED = 6304
 NUM_CLASSES = 7
 
-DATA_ROOT = "task2/data/PACS"
+DATA_ROOT = "common/datasets/PACS"
 
-ERM_CHECKPOINT = "task2/checkpoints/pt"
-DAN_CHECKPOINT = "task2/checkpoints/pt"
-DANN_CHECKPOINT = "task2/checkpoints/pt"
-CDAN_CHECKPOINT = "task2/checkpoints/pt"
+ERM_CHECKPOINT = "task2/models/erm_best.pt"
+DAN_CHECKPOINT = "task2/models/dan_best.pt"
+DANN_CHECKPOINT = "task2/models/dann_best.pt"
+CDAN_CHECKPOINT = "task2/models/cdan_best.pt"
 
 device = torch.device(
     "cuda" if torch.cuda.is_available()
@@ -30,12 +29,14 @@ print("Device:", device)
 
 
 def set_seed(seed):
+
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
 
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
 
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
@@ -104,18 +105,42 @@ class ERM(nn.Module):
 
         super().__init__()
 
-        self.features, self.classifier = build_backbone()
+        backbone = models.resnet18(
+            weights=None
+        )
+
+        backbone.fc = nn.Linear(
+            backbone.fc.in_features,
+            NUM_CLASSES
+        )
+
+        self.conv1 = backbone.conv1
+        self.bn1 = backbone.bn1
+        self.relu = backbone.relu
+        self.maxpool = backbone.maxpool
+        self.layer1 = backbone.layer1
+        self.layer2 = backbone.layer2
+        self.layer3 = backbone.layer3
+        self.layer4 = backbone.layer4
+        self.avgpool = backbone.avgpool
+        self.fc = backbone.fc
 
     def forward(self, x):
 
-        features = self.features(x)
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.maxpool(x)
 
-        features = torch.flatten(
-            features,
-            start_dim=1
-        )
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
 
-        return self.classifier(features)
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+
+        return self.fc(x)
 
 
 class DAN(nn.Module):
@@ -201,6 +226,62 @@ class CDAN(nn.Module):
         return features, class_logits
 
 
+def convert_resnet_state_dict(state_dict):
+
+    converted = {}
+
+    mapping = {
+        "conv1.": "features.0.",
+        "bn1.": "features.1.",
+        "layer1.": "features.4.",
+        "layer2.": "features.5.",
+        "layer3.": "features.6.",
+        "layer4.": "features.7.",
+        "fc.": "classifier."
+    }
+
+    for key, value in state_dict.items():
+
+        new_key = key
+
+        for old_prefix, new_prefix in mapping.items():
+
+            if key.startswith(old_prefix):
+
+                new_key = (
+                    new_prefix
+                    + key[len(old_prefix):]
+                )
+
+                break
+
+        converted[new_key] = value
+
+    return converted
+
+
+def load_model(model, checkpoint_path):
+    checkpoint = torch.load(
+        checkpoint_path,
+        map_location=device,
+        weights_only=False
+    )
+
+    if "model_state_dict" in checkpoint:
+        state_dict = checkpoint["model_state_dict"]
+    else:
+        state_dict = checkpoint
+
+    model.load_state_dict(
+        state_dict,
+        strict=False
+    )
+
+    model.to(device)
+
+    return model
+
+
 def evaluate(model, loader):
 
     model.eval()
@@ -221,8 +302,11 @@ def evaluate(model, loader):
             output = model(images)
 
             if isinstance(output, tuple):
+
                 class_logits = output[1]
+
             else:
+
                 class_logits = output
 
             predictions = class_logits.argmax(
@@ -306,20 +390,6 @@ def evaluate(model, loader):
     return accuracy, macro_f1
 
 
-def load_model(model, checkpoint_path):
-
-    model.load_state_dict(
-        torch.load(
-            checkpoint_path,
-            map_location=device
-        )
-    )
-
-    model.to(device)
-
-    return model
-
-
 def main():
 
     set_seed(SEED)
@@ -350,16 +420,19 @@ def main():
             batch_size=32,
             shuffle=False
         ),
+
         "Art": DataLoader(
             art_val,
             batch_size=32,
             shuffle=False
         ),
+
         "Cartoon": DataLoader(
             cartoon_val,
             batch_size=32,
             shuffle=False
         ),
+
         "Sketch": DataLoader(
             sketch,
             batch_size=32,
@@ -372,14 +445,17 @@ def main():
             ERM(),
             ERM_CHECKPOINT
         ),
+
         "DAN": (
             DAN(),
             DAN_CHECKPOINT
         ),
+
         "DANN": (
             DANN(),
             DANN_CHECKPOINT
         ),
+
         "CDAN": (
             CDAN(),
             CDAN_CHECKPOINT
@@ -491,3 +567,6 @@ def main():
             f"{change:+.4f}"
         )
 
+
+if __name__ == "__main__":
+    main()

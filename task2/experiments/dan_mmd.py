@@ -22,8 +22,8 @@ LR = 1e-4
 WEIGHT_DECAY = 1e-4
 LAMBDA_MMD = 1.0
 
-DATA_ROOT = "task2/data/PACS"
-CHECKPOINT = "task2/checkpoints/dan_best.pt"
+DATA_ROOT = "common/datasets/PACS"
+CHECKPOINT = "task2/models/dan_best.pt"
 
 DEVICE = torch.device(
     "cuda" if torch.cuda.is_available()
@@ -481,3 +481,6 @@ def main():
         if no_improvement >= PATIENCE:
             print("Early stopping.")
             break
+
+if __name__ == "__main__":
+    main()
