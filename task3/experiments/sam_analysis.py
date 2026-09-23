@@ -18,7 +18,7 @@ WEIGHT_DECAY = 1e-4
 
 RHO_VALUES = [0.01, 0.05, 0.1]
 
-DATA_ROOT = "data/PACS"
+DATA_ROOT = "common/datasets/PACS"
 
 SOURCE_DOMAINS = [
     "photo",
@@ -28,7 +28,7 @@ SOURCE_DOMAINS = [
 
 TARGET_DOMAIN = "sketch"
 
-OUTPUT_DIR = "results/sam_rho"
+OUTPUT_DIR = "task3/results/sam_rho"
 
 
 random.seed(SEED)

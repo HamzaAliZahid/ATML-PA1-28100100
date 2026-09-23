@@ -4,27 +4,31 @@ import numpy as np
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from torch.utils.data import DataLoader, Subset
 from torchvision import datasets, transforms, models
 
 from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, f1_score
 
 
 SEED = 6304
 NUM_CLASSES = 7
+
 BATCH_SIZE_PER_DOMAIN = 8
-BATCH_SIZE = 24
 EPOCHS = 50
 PATIENCE = 5
+
 LR = 1e-4
 WEIGHT_DECAY = 1e-4
 LAMBDA_DG = 1.0
 
-DATA_ROOT = "task3/data/PACS"
-CHECKPOINT_DIR = "task3/checkpoints"
-CHECKPOINT_PATH = os.path.join(CHECKPOINT_DIR, "dan_dg.pt")
+DATA_ROOT = "common/datasets/PACS"
+CHECKPOINT_DIR = "task3/models"
+CHECKPOINT_PATH = os.path.join(
+    CHECKPOINT_DIR,
+    "dan_dg.pt"
+)
 
 
 random.seed(SEED)
@@ -32,13 +36,16 @@ np.random.seed(SEED)
 torch.manual_seed(SEED)
 torch.cuda.manual_seed_all(SEED)
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device(
+    "cuda" if torch.cuda.is_available() else "cpu"
+)
+
 print("Device:", device)
 
 
 train_transform = transforms.Compose([
     transforms.Resize(256),
-    transforms.RandomResizedCrop(224),
+    transforms.RandomCrop(224),
     transforms.RandomHorizontalFlip(),
     transforms.ToTensor(),
     transforms.Normalize(
@@ -46,6 +53,7 @@ train_transform = transforms.Compose([
         std=[0.229, 0.224, 0.225]
     )
 ])
+
 
 val_transform = transforms.Compose([
     transforms.Resize(256),
@@ -59,8 +67,15 @@ val_transform = transforms.Compose([
 
 
 def load_domain(domain, transform):
-    path = os.path.join(DATA_ROOT, domain)
-    return datasets.ImageFolder(path, transform=transform)
+    path = os.path.join(
+        DATA_ROOT,
+        domain
+    )
+
+    return datasets.ImageFolder(
+        path,
+        transform=transform
+    )
 
 
 def make_split(dataset):
@@ -77,9 +92,21 @@ def make_split(dataset):
     return train_idx, val_idx
 
 
-photo = load_domain("photo", train_transform)
-art = load_domain("art_painting", train_transform)
-cartoon = load_domain("cartoon", train_transform)
+photo = load_domain(
+    "photo",
+    train_transform
+)
+
+art = load_domain(
+    "art_painting",
+    train_transform
+)
+
+cartoon = load_domain(
+    "cartoon",
+    train_transform
+)
+
 
 photo_train, photo_val = make_split(photo)
 art_train, art_val = make_split(art)
@@ -90,14 +117,16 @@ photo_train_loader = DataLoader(
     Subset(photo, photo_train),
     batch_size=BATCH_SIZE_PER_DOMAIN,
     shuffle=True,
-    drop_last=True
+    drop_last=True,
+    num_workers=0
 )
 
 art_train_loader = DataLoader(
     Subset(art, art_train),
     batch_size=BATCH_SIZE_PER_DOMAIN,
     shuffle=True,
-    drop_last=True
+    drop_last=True,
+    num_workers=0
 )
 
 cartoon_train_loader = DataLoader(
@@ -105,7 +134,7 @@ cartoon_train_loader = DataLoader(
     batch_size=BATCH_SIZE_PER_DOMAIN,
     shuffle=True,
     drop_last=True,
-    num_workers=2
+    num_workers=0
 )
 
 
@@ -134,10 +163,21 @@ class DAN_DG(nn.Module):
 
     def forward(self, x):
         features = self.features(x)
-        features = torch.flatten(features, start_dim=1)
+
+        features = torch.flatten(
+            features,
+            start_dim=1
+        )
+
         logits = self.classifier(features)
 
         return features, logits
+
+
+def freeze_bn_running_stats(model):
+    for module in model.modules():
+        if isinstance(module, nn.BatchNorm2d):
+            module.eval()
 
 
 def mmd_loss(x, y):
@@ -161,15 +201,21 @@ def mmd_loss(x, y):
         sigma = bandwidth * scale
 
         kernels.append(
-            torch.exp(-xx / (2 * sigma))
+            torch.exp(
+                -xx / (2 * sigma)
+            )
         )
 
         kernels.append(
-            torch.exp(-yy / (2 * sigma))
+            torch.exp(
+                -yy / (2 * sigma)
+            )
         )
 
         kernels.append(
-            torch.exp(-xy / (2 * sigma))
+            torch.exp(
+                -xy / (2 * sigma)
+            )
         )
 
     k_xx = sum(kernels[0::3]) / 3
@@ -186,8 +232,8 @@ def mmd_loss(x, y):
 def evaluate(model, loader, device):
     model.eval()
 
-    correct = 0
-    total = 0
+    all_labels = []
+    all_predictions = []
 
     with torch.no_grad():
         for images, labels in loader:
@@ -196,34 +242,67 @@ def evaluate(model, loader, device):
 
             _, logits = model(images)
 
-            predictions = logits.argmax(dim=1)
+            predictions = logits.argmax(
+                dim=1
+            )
 
-            correct += (predictions == labels).sum().item()
-            total += labels.size(0)
+            all_labels.extend(
+                labels.cpu().numpy()
+            )
 
-    return correct / total
+            all_predictions.extend(
+                predictions.cpu().numpy()
+            )
+
+    accuracy = accuracy_score(
+        all_labels,
+        all_predictions
+    )
+
+    macro_f1 = f1_score(
+        all_labels,
+        all_predictions,
+        average="macro"
+    )
+
+    return accuracy, macro_f1
 
 
-val_photo = load_domain("photo", val_transform)
-val_art = load_domain("art_painting", val_transform)
-val_cartoon = load_domain("cartoon", val_transform)
+val_photo = load_domain(
+    "photo",
+    val_transform
+)
+
+val_art = load_domain(
+    "art_painting",
+    val_transform
+)
+
+val_cartoon = load_domain(
+    "cartoon",
+    val_transform
+)
+
 
 photo_val_loader = DataLoader(
     Subset(val_photo, photo_val),
     batch_size=32,
-    shuffle=False
+    shuffle=False,
+    num_workers=0
 )
 
 art_val_loader = DataLoader(
     Subset(val_art, art_val),
     batch_size=32,
-    shuffle=False
+    shuffle=False,
+    num_workers=0
 )
 
 cartoon_val_loader = DataLoader(
     Subset(val_cartoon, cartoon_val),
     batch_size=32,
-    shuffle=False
+    shuffle=False,
+    num_workers=0
 )
 
 
@@ -237,14 +316,20 @@ optimizer = torch.optim.AdamW(
     weight_decay=WEIGHT_DECAY
 )
 
+
 best_score = -float("inf")
 patience_counter = 0
 
-os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+os.makedirs(
+    CHECKPOINT_DIR,
+    exist_ok=True
+)
 
 
 for epoch in range(EPOCHS):
+
     model.train()
+    freeze_bn_running_stats(model)
 
     total_loss = 0.0
 
@@ -253,6 +338,7 @@ for epoch in range(EPOCHS):
         art_train_loader,
         cartoon_train_loader
     ):
+
         photo_images, photo_labels = photo_batch
         art_images, art_labels = art_batch
         cartoon_images, cartoon_labels = cartoon_batch
@@ -268,14 +354,31 @@ for epoch in range(EPOCHS):
 
         optimizer.zero_grad()
 
-        photo_features, photo_logits = model(photo_images)
-        art_features, art_logits = model(art_images)
-        cartoon_features, cartoon_logits = model(cartoon_images)
+        photo_features, photo_logits = model(
+            photo_images
+        )
+
+        art_features, art_logits = model(
+            art_images
+        )
+
+        cartoon_features, cartoon_logits = model(
+            cartoon_images
+        )
 
         classification_loss = (
-            criterion(photo_logits, photo_labels)
-            + criterion(art_logits, art_labels)
-            + criterion(cartoon_logits, cartoon_labels)
+            criterion(
+                photo_logits,
+                photo_labels
+            )
+            + criterion(
+                art_logits,
+                art_labels
+            )
+            + criterion(
+                cartoon_logits,
+                cartoon_labels
+            )
         ) / 3
 
         mmd_photo_art = mmd_loss(
@@ -299,26 +402,29 @@ for epoch in range(EPOCHS):
             + mmd_art_cartoon
         ) / 3
 
-        loss = classification_loss + LAMBDA_DG * mmd
+        loss = (
+            classification_loss
+            + LAMBDA_DG * mmd
+        )
 
         loss.backward()
         optimizer.step()
 
         total_loss += loss.item()
 
-    photo_acc = evaluate(
+    photo_acc, photo_f1 = evaluate(
         model,
         photo_val_loader,
         device
     )
 
-    art_acc = evaluate(
+    art_acc, art_f1 = evaluate(
         model,
         art_val_loader,
         device
     )
 
-    cartoon_acc = evaluate(
+    cartoon_acc, cartoon_f1 = evaluate(
         model,
         cartoon_val_loader,
         device
@@ -330,29 +436,47 @@ for epoch in range(EPOCHS):
         + cartoon_acc
     ) / 3
 
+    mean_f1 = (
+        photo_f1
+        + art_f1
+        + cartoon_f1
+    ) / 3
+
     print(
         f"Epoch {epoch + 1}: "
         f"Loss={total_loss / len(photo_train_loader):.4f} "
         f"Photo={photo_acc:.4f} "
         f"Art={art_acc:.4f} "
         f"Cartoon={cartoon_acc:.4f} "
-        f"Mean={mean_acc:.4f}"
+        f"Mean Acc={mean_acc:.4f} "
+        f"Mean Macro-F1={mean_f1:.4f}"
     )
 
-    if mean_acc > best_score:
-        best_score = mean_acc
+    if mean_f1 > best_score:
+
+        best_score = mean_f1
         patience_counter = 0
 
         torch.save(
             model.state_dict(),
             CHECKPOINT_PATH
         )
+
     else:
+
         patience_counter += 1
 
         if patience_counter >= PATIENCE:
             print("Early stopping")
             break
 
-print("Best mean source validation accuracy:", best_score)
-print("Saved:", CHECKPOINT_PATH)
+
+print(
+    "Best mean source validation Macro-F1:",
+    best_score
+)
+
+print(
+    "Saved:",
+    CHECKPOINT_PATH
+)

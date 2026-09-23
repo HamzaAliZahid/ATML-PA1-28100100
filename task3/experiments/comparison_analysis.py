@@ -13,12 +13,12 @@ SEED = 6304
 NUM_CLASSES = 7
 BATCH_SIZE = 64
 
-DATA_ROOT = "data/PACS"
+DATA_ROOT = "common/datasets/PACS"
 
 MODEL_PATHS = {
-    "ERM": "results/erm_resnet18.pth",
-    "DAN-DG": "results/dan_dg_resnet18.pth",
-    "SAM": "results/sam_resnet18.pth",
+    "ERM": "task2/models/erm_best.pt",
+    "DAN-DG": "task3/models/dan_dg.pt",
+    "SAM": "task3/models/sam.pt",
 }
 
 
@@ -51,21 +51,86 @@ sketch_dataset = datasets.ImageFolder(
 sketch_loader = DataLoader(
     sketch_dataset,
     batch_size=BATCH_SIZE,
-    shuffle=False
+    shuffle=False,
+    num_workers=0,
+    pin_memory=True
 )
 
 
 class_names = sketch_dataset.classes
 
 print("\nClasses:")
+
 for i, name in enumerate(class_names):
     print(i, name)
 
 
-def create_model():
+class FeatureClassifier(nn.Module):
+
+    def __init__(self):
+
+        super().__init__()
+
+        backbone = models.resnet18(
+            weights=None
+        )
+
+        self.features = nn.Sequential(
+            *list(backbone.children())[:-1]
+        )
+
+        self.classifier = nn.Linear(
+            backbone.fc.in_features,
+            NUM_CLASSES
+        )
+
+    def forward(self, x):
+
+        features = self.features(x)
+
+        features = torch.flatten(
+            features,
+            start_dim=1
+        )
+
+        logits = self.classifier(features)
+
+        return logits
+
+
+def load_checkpoint(path):
+
+    checkpoint = torch.load(
+        path,
+        map_location=device,
+        weights_only=False
+    )
+
+    if isinstance(checkpoint, dict):
+
+        if "model_state_dict" in checkpoint:
+            return checkpoint["model_state_dict"]
+
+        return checkpoint
+
+    return checkpoint
+
+
+def convert_erm_checkpoint(state_dict):
+
+    converted = {}
+
+    for key, value in state_dict.items():
+
+        converted[key] = value
+
+    return converted
+
+
+def create_erm_model():
 
     model = models.resnet18(
-        weights=models.ResNet18_Weights.IMAGENET1K_V1
+        weights=None
     )
 
     model.fc = nn.Linear(
@@ -74,6 +139,52 @@ def create_model():
     )
 
     return model.to(device)
+
+
+def create_feature_classifier():
+
+    return FeatureClassifier().to(device)
+
+
+def load_model(model_name, model_path):
+
+    state_dict = load_checkpoint(model_path)
+
+    print(
+        "\nCheckpoint:",
+        model_path
+    )
+
+    print(
+        "First checkpoint keys:",
+        list(state_dict.keys())[:5]
+    )
+
+    if model_name == "ERM":
+
+        model = create_erm_model()
+
+        model.load_state_dict(
+            convert_erm_checkpoint(state_dict),
+            strict=True
+        )
+
+    else:
+
+        model = create_feature_classifier()
+
+        model.load_state_dict(
+            state_dict,
+            strict=True
+        )
+
+    model.eval()
+
+    print(
+        f"{model_name} loaded successfully"
+    )
+
+    return model
 
 
 def evaluate_model(model):
@@ -87,7 +198,10 @@ def evaluate_model(model):
 
         for images, labels in sketch_loader:
 
-            images = images.to(device)
+            images = images.to(
+                device,
+                non_blocking=True
+            )
 
             logits = model(images)
 
@@ -104,7 +218,10 @@ def evaluate_model(model):
                 labels.numpy()
             )
 
-    return np.array(all_labels), np.array(all_predictions)
+    return (
+        np.array(all_labels),
+        np.array(all_predictions)
+    )
 
 
 results = {}
@@ -116,21 +233,14 @@ for model_name, model_path in MODEL_PATHS.items():
     print(model_name)
     print("================================")
 
-    model = create_model()
-
-    checkpoint = torch.load(
-        model_path,
-        map_location=device
+    model = load_model(
+        model_name,
+        model_path
     )
 
-    if "model_state_dict" in checkpoint:
-        model.load_state_dict(
-            checkpoint["model_state_dict"]
-        )
-    else:
-        model.load_state_dict(checkpoint)
-
-    labels, predictions = evaluate_model(model)
+    labels, predictions = evaluate_model(
+        model
+    )
 
     cm = confusion_matrix(
         labels,
@@ -138,9 +248,13 @@ for model_name, model_path in MODEL_PATHS.items():
         labels=np.arange(NUM_CLASSES)
     )
 
-    per_class_accuracy = (
-        np.diag(cm) /
-        cm.sum(axis=1)
+    row_totals = cm.sum(axis=1)
+
+    per_class_accuracy = np.divide(
+        np.diag(cm),
+        row_totals,
+        out=np.zeros(NUM_CLASSES, dtype=float),
+        where=row_totals != 0
     )
 
     results[model_name] = {
@@ -168,7 +282,9 @@ erm_accuracy = results["ERM"]["per_class_accuracy"]
 
 for model_name in ["DAN-DG", "SAM"]:
 
-    model_accuracy = results[model_name]["per_class_accuracy"]
+    model_accuracy = (
+        results[model_name]["per_class_accuracy"]
+    )
 
     print(f"\n{model_name}")
 

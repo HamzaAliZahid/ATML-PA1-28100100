@@ -1,30 +1,24 @@
 import os
 import random
 import numpy as np
+
 import torch
 import torch.nn as nn
 
-from torch.utils.data import DataLoader, Subset
 from torchvision import datasets, transforms, models
 
 
 SEED = 6304
 NUM_CLASSES = 7
-BATCH_SIZE = 96
 RHO = 0.05
 
-DATA_ROOT = "data/PACS"
+DATA_ROOT = "common/datasets/PACS"
 
 MODEL_PATHS = {
-    "ERM": "results/erm_resnet18.pth",
-    "DAN-DG": "results/dan_dg_resnet18.pth",
-    "SAM": "results/sam_resnet18.pth",
+    "ERM": "task2/models/erm_best.pt",
+    "DAN-DG": "task3/models/dan_dg.pt",
+    "SAM": "task3/models/sam.pt",
 }
-
-
-random.seed(SEED)
-np.random.seed(SEED)
-torch.manual_seed(SEED)
 
 device = torch.device(
     "cuda" if torch.cuda.is_available()
@@ -34,148 +28,272 @@ device = torch.device(
 print("Device:", device)
 
 
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+set_seed(SEED)
+
+
+IMAGENET_MEAN = [0.485, 0.456, 0.406]
+IMAGENET_STD = [0.229, 0.224, 0.225]
+
+
 transform = transforms.Compose([
-    transforms.Resize((224, 224)),
+    transforms.Resize(256),
+    transforms.CenterCrop(224),
     transforms.ToTensor(),
     transforms.Normalize(
-        mean=[0.485, 0.456, 0.406],
-        std=[0.229, 0.224, 0.225]
-    )
+        IMAGENET_MEAN,
+        IMAGENET_STD
+    ),
 ])
 
 
-source_domains = [
-    "photo",
-    "art_painting",
-    "cartoon"
-]
-
-datasets_dict = {}
-
-for domain in source_domains:
-
+def load_domain(domain):
     path = os.path.join(
         DATA_ROOT,
         domain
     )
 
-    datasets_dict[domain] = datasets.ImageFolder(
+    return datasets.ImageFolder(
         path,
         transform=transform
     )
 
 
-rng = np.random.default_rng(SEED)
-
-selected_indices = {}
-
-for domain in source_domains:
-
-    selected_indices[domain] = rng.choice(
-        len(datasets_dict[domain]),
-        size=32,
-        replace=False
-    )
-
-
-def create_model():
-
-    model = models.resnet18(
+def build_features_classifier():
+    backbone = models.resnet18(
         weights=models.ResNet18_Weights.IMAGENET1K_V1
     )
 
-    model.fc = nn.Linear(
-        model.fc.in_features,
+    features = nn.Sequential(
+        *list(backbone.children())[:-1]
+    )
+
+    classifier = nn.Linear(
+        backbone.fc.in_features,
         NUM_CLASSES
     )
 
-    return model.to(device)
+    return features, classifier
 
 
-def get_validation_batch():
+class FeatureClassifier(nn.Module):
 
-    images_list = []
-    labels_list = []
+    def __init__(self):
+        super().__init__()
 
-    for domain in source_domains:
-
-        subset = Subset(
-            datasets_dict[domain],
-            selected_indices[domain]
+        self.features, self.classifier = (
+            build_features_classifier()
         )
 
-        loader = DataLoader(
-            subset,
-            batch_size=32,
-            shuffle=False,
-            num_workers=0
+    def forward(self, x):
+        x = self.features(x)
+
+        x = torch.flatten(
+            x,
+            start_dim=1
         )
 
-        images, labels = next(iter(loader))
-
-        images_list.append(images)
-        labels_list.append(labels)
-
-    images = torch.cat(
-        images_list,
-        dim=0
-    ).to(device)
-
-    labels = torch.cat(
-        labels_list,
-        dim=0
-    ).to(device)
-
-    return images, labels
+        return self.classifier(x)
 
 
-images, labels = get_validation_batch()
-
-criterion = nn.CrossEntropyLoss()
-
-sharpness_results = {}
-
-
-for model_name, model_path in MODEL_PATHS.items():
-
-    print("\n================================")
-    print(model_name)
-    print("================================")
-
-    model = create_model()
-
-    checkpoint = torch.load(
-        model_path,
-        map_location=device
+def build_erm_model():
+    backbone = models.resnet18(
+        weights=models.ResNet18_Weights.IMAGENET1K_V1
     )
 
-    if "model_state_dict" in checkpoint:
-        model.load_state_dict(
-            checkpoint["model_state_dict"]
+    features = nn.Sequential(
+        *list(backbone.children())[:-1]
+    )
+
+    classifier = nn.Linear(
+        backbone.fc.in_features,
+        NUM_CLASSES
+    )
+
+    return nn.Sequential(
+        features,
+        nn.Flatten(),
+        classifier
+    )
+
+
+def extract_state_dict(checkpoint):
+
+    if isinstance(checkpoint, dict):
+
+        if "model_state_dict" in checkpoint:
+            return checkpoint["model_state_dict"]
+
+        if "state_dict" in checkpoint:
+            return checkpoint["state_dict"]
+
+    return checkpoint
+
+
+def load_erm_checkpoint(model, checkpoint_path):
+
+    checkpoint = torch.load(
+        checkpoint_path,
+        map_location=device,
+        weights_only=False
+    )
+
+    state_dict = extract_state_dict(checkpoint)
+
+    model_state_dict = model.state_dict()
+
+    if set(state_dict.keys()) == set(
+        model_state_dict.keys()
+    ):
+        model.load_state_dict(state_dict)
+        return
+
+    converted_state_dict = {}
+
+    mapping = {
+        "conv1.": "0.0.",
+        "bn1.": "0.1.",
+        "layer1.": "0.4.",
+        "layer2.": "0.5.",
+        "layer3.": "0.6.",
+        "layer4.": "0.7.",
+        "fc.": "2.",
+    }
+
+    for key, value in state_dict.items():
+
+        new_key = key
+
+        for old_prefix, new_prefix in mapping.items():
+
+            if key.startswith(old_prefix):
+
+                new_key = (
+                    new_prefix
+                    + key[len(old_prefix):]
+                )
+
+                break
+
+        converted_state_dict[new_key] = value
+
+    model.load_state_dict(
+        converted_state_dict
+    )
+
+
+def load_feature_classifier_checkpoint(
+    model,
+    checkpoint_path
+):
+
+    checkpoint = torch.load(
+        checkpoint_path,
+        map_location=device,
+        weights_only=False
+    )
+
+    state_dict = extract_state_dict(checkpoint)
+
+    cleaned_state_dict = {}
+
+    for key, value in state_dict.items():
+
+        if key.startswith("module."):
+            key = key[len("module."):]
+
+        cleaned_state_dict[key] = value
+
+    model.load_state_dict(
+        cleaned_state_dict
+    )
+
+
+def get_fixed_batch():
+
+    domains = [
+        "photo",
+        "art_painting",
+        "cartoon"
+    ]
+
+    images = []
+    labels = []
+
+    rng = np.random.default_rng(SEED)
+
+    for domain in domains:
+
+        dataset = load_domain(domain)
+
+        indices = rng.choice(
+            len(dataset),
+            size=min(32, len(dataset)),
+            replace=False
         )
-    else:
-        model.load_state_dict(checkpoint)
+
+        for index in indices:
+
+            image, label = dataset[index]
+
+            images.append(image)
+            labels.append(label)
+
+    images = torch.stack(images)
+    labels = torch.tensor(labels)
+
+    return images.to(device), labels.to(device)
+
+
+def compute_sharpness(
+    model,
+    images,
+    labels
+):
 
     model.eval()
 
     model.zero_grad()
 
-    loss = criterion(
-        model(images),
+    logits = model(images)
+
+    loss_function = nn.CrossEntropyLoss()
+
+    loss = loss_function(
+        logits,
         labels
     )
 
     loss.backward()
 
-    grad_norm = torch.norm(
-        torch.stack([
-            p.grad.norm()
-            for p in model.parameters()
-            if p.grad is not None
-        ])
+    gradients = []
+
+    for parameter in model.parameters():
+
+        if parameter.grad is not None:
+
+            gradients.append(
+                parameter.grad.detach().clone()
+            )
+
+    grad_norm = torch.sqrt(
+        sum(
+            torch.sum(gradient ** 2)
+            for gradient in gradients
+        )
     )
 
-    scale = RHO / (grad_norm + 1e-12)
+    scale = RHO / (
+        grad_norm + 1e-12
+    )
 
     perturbations = []
 
@@ -183,56 +301,167 @@ for model_name, model_path in MODEL_PATHS.items():
 
         for parameter in model.parameters():
 
-            if parameter.grad is not None:
+            if parameter.grad is None:
+                perturbations.append(None)
+                continue
 
-                epsilon = parameter.grad * scale
+            perturbation = (
+                parameter.grad * scale
+            )
 
-                parameter.add_(epsilon)
+            parameter.add_(perturbation)
 
-                perturbations.append(
-                    (parameter, epsilon)
-                )
+            perturbations.append(
+                perturbation
+            )
 
     with torch.no_grad():
 
-        perturbed_loss = criterion(
-            model(images),
+        perturbed_logits = model(images)
+
+        perturbed_loss = loss_function(
+            perturbed_logits,
             labels
         )
 
     with torch.no_grad():
 
-        for parameter, epsilon in perturbations:
+        index = 0
 
-            parameter.sub_(epsilon)
+        for parameter in model.parameters():
+
+            if parameter.grad is None:
+                continue
+
+            parameter.sub_(
+                perturbations[index]
+            )
+
+            index += 1
+
+    model.zero_grad()
 
     sharpness = (
         perturbed_loss.item()
         - loss.item()
     )
 
-    sharpness_results[model_name] = sharpness
-
-    print(
-        f"Original loss: {loss.item():.6f}"
-    )
-
-    print(
-        f"Perturbed loss: {perturbed_loss.item():.6f}"
-    )
-
-    print(
-        f"Delta sharp: {sharpness:.6f}"
+    return (
+        loss.item(),
+        perturbed_loss.item(),
+        sharpness,
+        grad_norm.item()
     )
 
 
-print("\n================================")
-print("LOCAL SHARPNESS RESULTS")
-print("================================")
+def main():
 
-for model_name, value in sharpness_results.items():
+    images, labels = get_fixed_batch()
 
     print(
-        f"{model_name:8s}: "
-        f"{value:.6f}"
+        "Fixed batch size:",
+        images.size(0)
     )
+
+    print(
+        "Sharpness radius:",
+        RHO
+    )
+
+    print()
+
+    results = {}
+
+    for model_name, checkpoint_path in MODEL_PATHS.items():
+
+        print("=" * 60)
+        print(model_name)
+        print("=" * 60)
+
+        if not os.path.exists(checkpoint_path):
+
+            print(
+                "Checkpoint not found:",
+                checkpoint_path
+            )
+
+            continue
+
+        if model_name == "ERM":
+
+            model = build_erm_model()
+
+            load_erm_checkpoint(
+                model,
+                checkpoint_path
+            )
+
+        else:
+
+            model = FeatureClassifier()
+
+            load_feature_classifier_checkpoint(
+                model,
+                checkpoint_path
+            )
+
+        model = model.to(device)
+
+        loss, perturbed_loss, sharpness, grad_norm = (
+            compute_sharpness(
+                model,
+                images,
+                labels
+            )
+        )
+
+        results[model_name] = {
+            "loss": loss,
+            "perturbed_loss": perturbed_loss,
+            "sharpness": sharpness,
+            "gradient_norm": grad_norm,
+        }
+
+        print(
+            f"Loss:              {loss:.6f}"
+        )
+
+        print(
+            f"Perturbed Loss:    {perturbed_loss:.6f}"
+        )
+
+        print(
+            f"Sharpness:         {sharpness:.6f}"
+        )
+
+        print(
+            f"Gradient Norm:     {grad_norm:.6f}"
+        )
+
+        print()
+
+    print("=" * 60)
+    print("SHARPNESS COMPARISON")
+    print("=" * 60)
+
+    print(
+        f"{'Model':<12}"
+        f"{'Loss':>14}"
+        f"{'Perturbed':>16}"
+        f"{'Sharpness':>16}"
+        f"{'Grad Norm':>16}"
+    )
+
+    for model_name, result in results.items():
+
+        print(
+            f"{model_name:<12}"
+            f"{result['loss']:>14.6f}"
+            f"{result['perturbed_loss']:>16.6f}"
+            f"{result['sharpness']:>16.6f}"
+            f"{result['gradient_norm']:>16.6f}"
+        )
+
+
+if __name__ == "__main__":
+    main()

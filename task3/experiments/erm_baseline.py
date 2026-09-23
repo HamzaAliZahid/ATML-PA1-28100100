@@ -13,8 +13,8 @@ from sklearn.model_selection import train_test_split
 SEED = 6304
 NUM_CLASSES = 7
 
-DATA_ROOT = "task2/data/PACS"
-ERM_CHECKPOINT = "task2/checkpoints/pt"
+DATA_ROOT = "common/datasets/PACS"
+ERM_CHECKPOINT = "task2/models/erm_best.pt"
 
 device = torch.device(
     "cuda" if torch.cuda.is_available()
@@ -179,10 +179,12 @@ def evaluate(model, loader):
         )
 
         if precision + recall > 0:
+
             f1 = (
                 2 * precision * recall
                 / (precision + recall)
             )
+
         else:
             f1 = 0.0
 
@@ -191,6 +193,72 @@ def evaluate(model, loader):
     macro_f1 = np.mean(f1_scores)
 
     return accuracy, macro_f1
+
+
+def load_checkpoint(model):
+
+    checkpoint = torch.load(
+        ERM_CHECKPOINT,
+        map_location=device,
+        weights_only=False
+    )
+
+    if isinstance(checkpoint, dict):
+
+        if "model_state_dict" in checkpoint:
+
+            state_dict = checkpoint["model_state_dict"]
+
+        else:
+
+            state_dict = checkpoint
+
+    else:
+
+        state_dict = checkpoint
+
+    model_state_dict = model.state_dict()
+
+    if set(state_dict.keys()) == set(
+        model_state_dict.keys()
+    ):
+
+        model.load_state_dict(state_dict)
+
+        return
+
+    converted_state_dict = {}
+
+    mapping = {
+        "conv1.": "0.0.",
+        "bn1.": "0.1.",
+        "layer1.": "0.4.",
+        "layer2.": "0.5.",
+        "layer3.": "0.6.",
+        "layer4.": "0.7.",
+        "fc.": "2."
+    }
+
+    for key, value in state_dict.items():
+
+        new_key = key
+
+        for old_prefix, new_prefix in mapping.items():
+
+            if key.startswith(old_prefix):
+
+                new_key = (
+                    new_prefix
+                    + key[len(old_prefix):]
+                )
+
+                break
+
+        converted_state_dict[new_key] = value
+
+    model.load_state_dict(
+        converted_state_dict
+    )
 
 
 def main():
@@ -236,12 +304,8 @@ def main():
 
     model = build_model()
 
-    checkpoint = torch.load(
-        ERM_CHECKPOINT,
-        map_location=device
-    )
+    load_checkpoint(model)
 
-    model.load_state_dict(checkpoint)
     model.to(device)
 
     results = {}
@@ -274,11 +338,21 @@ def main():
             f"Macro-F1={macro_f1:.4f}"
         )
 
-    mean_accuracy = np.mean(accuracies)
-    mean_f1 = np.mean(f1_scores)
+    mean_accuracy = np.mean(
+        accuracies
+    )
 
-    worst_accuracy = np.min(accuracies)
-    worst_f1 = np.min(f1_scores)
+    mean_f1 = np.mean(
+        f1_scores
+    )
+
+    worst_accuracy = np.min(
+        accuracies
+    )
+
+    worst_f1 = np.min(
+        f1_scores
+    )
 
     print()
     print("=" * 50)
@@ -296,3 +370,7 @@ def main():
         f"Accuracy={worst_accuracy:.4f}, "
         f"Macro-F1={worst_f1:.4f}"
     )
+
+
+if __name__ == "__main__":
+    main()

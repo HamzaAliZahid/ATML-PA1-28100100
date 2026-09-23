@@ -13,22 +13,32 @@ from sklearn.model_selection import train_test_split
 
 SEED = 6304
 NUM_CLASSES = 7
+
 BATCH_SIZE_PER_DOMAIN = 8
+VAL_BATCH_SIZE = 32
+
 EPOCHS = 50
 PATIENCE = 5
+
 LR = 1e-4
 WEIGHT_DECAY = 1e-4
 RHO = 0.05
 
-DATA_ROOT = "task3/data/PACS"
-CHECKPOINT_DIR = "task3/checkpoints"
-CHECKPOINT_PATH = os.path.join(CHECKPOINT_DIR, "sam.pt")
+DATA_ROOT = "common/datasets/PACS"
+CHECKPOINT_DIR = "task3/models"
+CHECKPOINT_PATH = os.path.join(
+    CHECKPOINT_DIR,
+    "sam.pt"
+)
 
 
 random.seed(SEED)
 np.random.seed(SEED)
 torch.manual_seed(SEED)
-torch.cuda.manual_seed_all(SEED)
+
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(SEED)
+
 
 device = torch.device(
     "cuda" if torch.cuda.is_available() else "cpu"
@@ -48,6 +58,7 @@ train_transform = transforms.Compose([
     )
 ])
 
+
 val_transform = transforms.Compose([
     transforms.Resize(256),
     transforms.CenterCrop(224),
@@ -61,7 +72,11 @@ val_transform = transforms.Compose([
 
 def load_domain(domain, transform):
     path = os.path.join(DATA_ROOT, domain)
-    return datasets.ImageFolder(path, transform=transform)
+
+    return datasets.ImageFolder(
+        root=path,
+        transform=transform
+    )
 
 
 def make_split(dataset):
@@ -78,34 +93,117 @@ def make_split(dataset):
     return train_idx, val_idx
 
 
-photo = load_domain("photo", train_transform)
-art = load_domain("art_painting", train_transform)
-cartoon = load_domain("cartoon", train_transform)
+photo_train_dataset = load_domain(
+    "photo",
+    train_transform
+)
 
-photo_train, photo_val = make_split(photo)
-art_train, art_val = make_split(art)
-cartoon_train, cartoon_val = make_split(cartoon)
+art_train_dataset = load_domain(
+    "art_painting",
+    train_transform
+)
+
+cartoon_train_dataset = load_domain(
+    "cartoon",
+    train_transform
+)
+
+
+photo_train_idx, photo_val_idx = make_split(
+    photo_train_dataset
+)
+
+art_train_idx, art_val_idx = make_split(
+    art_train_dataset
+)
+
+cartoon_train_idx, cartoon_val_idx = make_split(
+    cartoon_train_dataset
+)
 
 
 photo_train_loader = DataLoader(
-    Subset(photo, photo_train),
+    Subset(
+        photo_train_dataset,
+        photo_train_idx
+    ),
     batch_size=BATCH_SIZE_PER_DOMAIN,
     shuffle=True,
-    drop_last=True
+    drop_last=True,
+    num_workers=0
 )
+
 
 art_train_loader = DataLoader(
-    Subset(art, art_train),
+    Subset(
+        art_train_dataset,
+        art_train_idx
+    ),
     batch_size=BATCH_SIZE_PER_DOMAIN,
     shuffle=True,
-    drop_last=True
+    drop_last=True,
+    num_workers=0
 )
 
+
 cartoon_train_loader = DataLoader(
-    Subset(cartoon, cartoon_train),
+    Subset(
+        cartoon_train_dataset,
+        cartoon_train_idx
+    ),
     batch_size=BATCH_SIZE_PER_DOMAIN,
     shuffle=True,
-    drop_last=True
+    drop_last=True,
+    num_workers=0
+)
+
+
+photo_val_dataset = load_domain(
+    "photo",
+    val_transform
+)
+
+art_val_dataset = load_domain(
+    "art_painting",
+    val_transform
+)
+
+cartoon_val_dataset = load_domain(
+    "cartoon",
+    val_transform
+)
+
+
+photo_val_loader = DataLoader(
+    Subset(
+        photo_val_dataset,
+        photo_val_idx
+    ),
+    batch_size=VAL_BATCH_SIZE,
+    shuffle=False,
+    num_workers=0
+)
+
+
+art_val_loader = DataLoader(
+    Subset(
+        art_val_dataset,
+        art_val_idx
+    ),
+    batch_size=VAL_BATCH_SIZE,
+    shuffle=False,
+    num_workers=0
+)
+
+
+cartoon_val_loader = DataLoader(
+    Subset(
+        cartoon_val_dataset,
+        cartoon_val_idx
+    ),
+    batch_size=VAL_BATCH_SIZE,
+    shuffle=False,
+    num_workers=0
 )
 
 
@@ -127,6 +225,7 @@ def build_backbone():
 
 
 class SAMModel(nn.Module):
+
     def __init__(self):
         super().__init__()
 
@@ -134,16 +233,54 @@ class SAMModel(nn.Module):
 
     def forward(self, x):
         features = self.features(x)
-        features = torch.flatten(features, start_dim=1)
+        features = torch.flatten(
+            features,
+            start_dim=1
+        )
 
         logits = self.classifier(features)
 
         return logits
 
 
-def compute_loss(model, images, labels, criterion):
+def compute_loss(
+    model,
+    images,
+    labels,
+    criterion
+):
     logits = model(images)
-    return criterion(logits, labels)
+
+    loss = criterion(
+        logits,
+        labels
+    )
+
+    return loss
+
+
+def get_grad_norm(model):
+    gradients = []
+
+    for parameter in model.parameters():
+
+        if parameter.grad is not None:
+            gradients.append(
+                parameter.grad.norm(
+                    p=2
+                )
+            )
+
+    if len(gradients) == 0:
+        return torch.tensor(
+            0.0,
+            device=device
+        )
+
+    return torch.norm(
+        torch.stack(gradients),
+        p=2
+    )
 
 
 def sam_step(
@@ -165,24 +302,30 @@ def sam_step(
 
     loss.backward()
 
-    grad_norm = torch.norm(
-        torch.stack([
-            p.grad.norm()
-            for p in model.parameters()
-            if p.grad is not None
-        ])
-    )
+    grad_norm = get_grad_norm(model)
 
-    scale = rho / (grad_norm + 1e-12)
+    scale = rho / (
+        grad_norm + 1e-12
+    )
 
     perturbations = []
 
     with torch.no_grad():
+
         for parameter in model.parameters():
-            if parameter.grad is not None:
-                epsilon = parameter.grad * scale
-                parameter.add_(epsilon)
-                perturbations.append((parameter, epsilon))
+
+            if parameter.grad is None:
+                continue
+
+            epsilon = (
+                parameter.grad * scale
+            )
+
+            parameter.add_(epsilon)
+
+            perturbations.append(
+                (parameter, epsilon)
+            )
 
     optimizer.zero_grad()
 
@@ -196,6 +339,7 @@ def sam_step(
     perturbed_loss.backward()
 
     with torch.no_grad():
+
         for parameter, epsilon in perturbations:
             parameter.sub_(epsilon)
 
@@ -205,18 +349,24 @@ def sam_step(
 
 
 def evaluate(model, loader):
+
     model.eval()
 
     correct = 0
     total = 0
 
     with torch.no_grad():
+
         for images, labels in loader:
+
             images = images.to(device)
             labels = labels.to(device)
 
             logits = model(images)
-            predictions = logits.argmax(dim=1)
+
+            predictions = logits.argmax(
+                dim=1
+            )
 
             correct += (
                 predictions == labels
@@ -224,34 +374,10 @@ def evaluate(model, loader):
 
             total += labels.size(0)
 
+    if total == 0:
+        return 0.0
+
     return correct / total
-
-
-val_photo = load_domain("photo", val_transform)
-val_art = load_domain("art_painting", val_transform)
-val_cartoon = load_domain("cartoon", val_transform)
-
-
-photo_val_loader = DataLoader(
-    Subset(val_photo, photo_val),
-    batch_size=32,
-    shuffle=False,
-    num_workers=2
-)
-
-art_val_loader = DataLoader(
-    Subset(val_art, art_val),
-    batch_size=32,
-    shuffle=False,
-    num_workers=2
-)
-
-cartoon_val_loader = DataLoader(
-    Subset(val_cartoon, cartoon_val),
-    batch_size=32,
-    shuffle=False,
-    num_workers=2
-)
 
 
 model = SAMModel().to(device)
@@ -265,49 +391,68 @@ optimizer = torch.optim.AdamW(
 )
 
 
+os.makedirs(
+    CHECKPOINT_DIR,
+    exist_ok=True
+)
+
+
 best_score = -float("inf")
 patience_counter = 0
 
-os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+
+print("Starting SAM training...")
 
 
 for epoch in range(EPOCHS):
+
     model.train()
 
     total_loss = 0.0
     steps = 0
 
-    for photo_batch, art_batch, cartoon_batch in zip(
+    for (
+        photo_batch,
+        art_batch,
+        cartoon_batch
+    ) in zip(
         photo_train_loader,
         art_train_loader,
         cartoon_train_loader
     ):
+
         photo_images, photo_labels = photo_batch
         art_images, art_labels = art_batch
         cartoon_images, cartoon_labels = cartoon_batch
 
-        images = torch.cat([
-            photo_images,
-            art_images,
-            cartoon_images
-        ])
+        images = torch.cat(
+            [
+                photo_images,
+                art_images,
+                cartoon_images
+            ],
+            dim=0
+        )
 
-        labels = torch.cat([
-            photo_labels,
-            art_labels,
-            cartoon_labels
-        ])
+        labels = torch.cat(
+            [
+                photo_labels,
+                art_labels,
+                cartoon_labels
+            ],
+            dim=0
+        )
 
         images = images.to(device)
         labels = labels.to(device)
 
         loss = sam_step(
-            model,
-            optimizer,
-            images,
-            labels,
-            criterion,
-            RHO
+            model=model,
+            optimizer=optimizer,
+            images=images,
+            labels=labels,
+            criterion=criterion,
+            rho=RHO
         )
 
         total_loss += loss
@@ -332,18 +477,25 @@ for epoch in range(EPOCHS):
         photo_acc
         + art_acc
         + cartoon_acc
-    ) / 3
+    ) / 3.0
+
+    average_loss = (
+        total_loss / steps
+        if steps > 0
+        else 0.0
+    )
 
     print(
-        f"Epoch {epoch + 1}: "
-        f"Loss={total_loss / steps:.4f} "
-        f"Photo={photo_acc:.4f} "
-        f"Art={art_acc:.4f} "
-        f"Cartoon={cartoon_acc:.4f} "
+        f"Epoch {epoch + 1:02d} | "
+        f"Loss={average_loss:.4f} | "
+        f"Photo={photo_acc:.4f} | "
+        f"Art={art_acc:.4f} | "
+        f"Cartoon={cartoon_acc:.4f} | "
         f"Mean={mean_acc:.4f}"
     )
 
     if mean_acc > best_score:
+
         best_score = mean_acc
         patience_counter = 0
 
@@ -351,13 +503,28 @@ for epoch in range(EPOCHS):
             model.state_dict(),
             CHECKPOINT_PATH
         )
+
+        print(
+            f"  Saved best model: {CHECKPOINT_PATH}"
+        )
+
     else:
+
         patience_counter += 1
 
         if patience_counter >= PATIENCE:
+
             print("Early stopping")
             break
 
 
-print("Best mean source validation accuracy:", best_score)
-print("Saved:", CHECKPOINT_PATH)
+print()
+print(
+    "Best mean source validation accuracy:",
+    f"{best_score:.4f}"
+)
+
+print(
+    "Saved:",
+    CHECKPOINT_PATH
+)
