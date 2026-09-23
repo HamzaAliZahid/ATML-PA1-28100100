@@ -1,0 +1,6 @@
+/.venv
+/common/datasets
+/task1/images
+/task1/models
+/task1/experiments/imports
+/task1/results
