@@ -10,6 +10,7 @@ from torchvision import datasets, transforms, models
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score
 
+
 SEED = 6304
 
 BATCH_SIZE = 128
@@ -17,14 +18,18 @@ BATCH_SIZE = 128
 NUM_CLASSES = 10
 NUM_DUMMY = 5
 
-CHECKPOINT_PATH = "task4/checkpoints/proser_best.pth"
+CHECKPOINT_PATH = "task4/models/proser_best.pth"
+RESULTS_PATH = "task4/models/proser_results.pt"
 
-DATA_DIR = "data"
+CIFAR10_DIR = "common/datasets/CIFAR10"
+CIFAR100_DIR = "common/datasets/CIFAR100"
+
 
 random.seed(SEED)
 np.random.seed(SEED)
 torch.manual_seed(SEED)
 torch.cuda.manual_seed_all(SEED)
+
 
 device = torch.device(
     "cuda" if torch.cuda.is_available() else "cpu"
@@ -32,13 +37,10 @@ device = torch.device(
 
 print("Device:", device)
 
+
 class PROSER(nn.Module):
 
-    def __init__(
-        self,
-        num_classes=10,
-        num_dummy=5
-    ):
+    def __init__(self, num_classes=10, num_dummy=5):
         super().__init__()
 
         self.backbone = models.resnet18(weights=None)
@@ -68,7 +70,6 @@ class PROSER(nn.Module):
             num_dummy
         )
 
-
     def forward_to_layer2(self, x):
 
         x = self.backbone.conv1(x)
@@ -81,7 +82,6 @@ class PROSER(nn.Module):
 
         return x
 
-
     def layer2_to_features(self, x):
 
         x = self.backbone.layer3(x)
@@ -93,37 +93,38 @@ class PROSER(nn.Module):
 
         return x
 
-
     def forward(self, x):
 
         x = self.forward_to_layer2(x)
-
         x = self.layer2_to_features(x)
 
         known_logits = self.classifier(x)
-
         dummy_logits = self.dummy_classifier(x)
 
         return known_logits, dummy_logits
+
 
 eval_transform = transforms.Compose([
     transforms.ToTensor()
 ])
 
 
+print("\nLoading CIFAR-10...")
+
 full_train_dataset = datasets.CIFAR10(
-    root=DATA_DIR,
+    root=CIFAR10_DIR,
     train=True,
     download=True,
     transform=eval_transform
 )
 
 test_dataset = datasets.CIFAR10(
-    root=DATA_DIR,
+    root=CIFAR10_DIR,
     train=False,
     download=True,
     transform=eval_transform
 )
+
 
 labels = np.array(full_train_dataset.targets)
 
@@ -131,7 +132,7 @@ indices = np.arange(
     len(full_train_dataset)
 )
 
-train_indices, val_indices = train_test_split(
+_, val_indices = train_test_split(
     indices,
     test_size=0.10,
     stratify=labels,
@@ -144,13 +145,15 @@ val_dataset = Subset(
     val_indices
 )
 
+
+print("Loading CIFAR-100...")
+
 cifar100_dataset = datasets.CIFAR100(
-    root=DATA_DIR,
+    root=CIFAR100_DIR,
     train=False,
     download=True,
     transform=eval_transform
 )
-
 
 cifar100_classes = cifar100_dataset.classes
 
@@ -213,11 +216,11 @@ far_dataset = Subset(
     far_indices
 )
 
+
 val_loader = DataLoader(
     val_dataset,
     batch_size=BATCH_SIZE,
     shuffle=False,
-    num_workers=4,
     pin_memory=True
 )
 
@@ -225,7 +228,6 @@ test_loader = DataLoader(
     test_dataset,
     batch_size=BATCH_SIZE,
     shuffle=False,
-    num_workers=4,
     pin_memory=True
 )
 
@@ -233,7 +235,6 @@ near_loader = DataLoader(
     near_dataset,
     batch_size=BATCH_SIZE,
     shuffle=False,
-    num_workers=4,
     pin_memory=True
 )
 
@@ -241,14 +242,23 @@ far_loader = DataLoader(
     far_dataset,
     batch_size=BATCH_SIZE,
     shuffle=False,
-    num_workers=4,
     pin_memory=True
 )
+
+
+print("\nLoading PROSER checkpoint...")
 
 model = PROSER(
     num_classes=NUM_CLASSES,
     num_dummy=NUM_DUMMY
 )
+
+
+if not os.path.exists(CHECKPOINT_PATH):
+    raise FileNotFoundError(
+        f"Checkpoint not found: {CHECKPOINT_PATH}"
+    )
+
 
 checkpoint = torch.load(
     CHECKPOINT_PATH,
@@ -256,13 +266,18 @@ checkpoint = torch.load(
     weights_only=False
 )
 
-model.load_state_dict(
-    checkpoint["model_state_dict"]
-)
+
+if "model_state_dict" in checkpoint:
+    model.load_state_dict(
+        checkpoint["model_state_dict"]
+    )
+else:
+    model.load_state_dict(checkpoint)
+
 
 model = model.to(device)
-
 model.eval()
+
 
 def extract_outputs(model, loader):
 
@@ -274,7 +289,10 @@ def extract_outputs(model, loader):
 
         for images, labels in loader:
 
-            images = images.to(device)
+            images = images.to(
+                device,
+                non_blocking=True
+            )
 
             known_logits, dummy_logits = model(
                 images
@@ -291,7 +309,6 @@ def extract_outputs(model, loader):
             all_labels.append(
                 labels
             )
-
 
     return (
         torch.cat(all_known_logits),
@@ -331,10 +348,9 @@ far_known, far_dummy, far_labels = extract_outputs(
     far_loader
 )
 
-def proser_raw_score(
-    known_logits,
-    dummy_logits
-):
+
+def proser_raw_score(known_logits, dummy_logits):
+
     max_known = known_logits.max(
         dim=1
     ).values
@@ -344,6 +360,7 @@ def proser_raw_score(
     ).values
 
     return max_dummy - max_known
+
 
 val_raw = proser_raw_score(
     val_known,
@@ -365,20 +382,23 @@ far_raw = proser_raw_score(
     far_dummy
 )
 
+
 bias = torch.quantile(
     val_raw,
     0.95
 ).item()
 
-print("PROSER calibration bias:", bias)
+
+print(
+    f"\nPROSER calibration bias: {bias:.6f}"
+)
+
 
 val_score = val_raw - bias
-
 test_score = test_raw - bias
-
 near_score = near_raw - bias
-
 far_score = far_raw - bias
+
 
 test_predictions = test_known.argmax(
     dim=1
@@ -388,15 +408,16 @@ test_accuracy = (
     test_predictions == test_labels
 ).float().mean().item()
 
+
 print(
     f"CIFAR-10 test accuracy: "
     f"{100 * test_accuracy:.2f}%"
 )
 
+
 known_accepted = (
     test_score <= 0
 ).float().mean().item()
-
 
 known_rejected = (
     test_score > 0
@@ -413,10 +434,10 @@ print(
     f"{100 * known_rejected:.2f}%"
 )
 
+
 near_rejected = (
     near_score > 0
 ).float().mean().item()
-
 
 far_rejected = (
     far_score > 0
@@ -433,10 +454,9 @@ print(
     f"{100 * far_rejected:.2f}%"
 )
 
+
 known_scores = test_score.numpy()
-
 near_scores = near_score.numpy()
-
 far_scores = far_score.numpy()
 
 
@@ -452,6 +472,7 @@ far_labels_binary = np.ones(
     len(far_scores)
 )
 
+
 near_y_true = np.concatenate([
     known_labels,
     near_labels_binary
@@ -462,10 +483,12 @@ near_y_score = np.concatenate([
     near_scores
 ])
 
+
 near_auroc = roc_auc_score(
     near_y_true,
     near_y_score
 )
+
 
 far_y_true = np.concatenate([
     known_labels,
@@ -482,6 +505,7 @@ far_auroc = roc_auc_score(
     far_y_true,
     far_y_score
 )
+
 
 all_unknown_scores = np.concatenate([
     near_scores,
@@ -509,7 +533,8 @@ all_auroc = roc_auc_score(
     all_y_score
 )
 
-print("=" * 50)
+
+print("\n" + "=" * 50)
 print("PROSER RESULTS")
 print("=" * 50)
 
@@ -530,23 +555,16 @@ print(
 
 print("=" * 50)
 
+
 results = {
     "bias": bias,
-
     "test_accuracy": test_accuracy,
-
     "known_acceptance": known_accepted,
-
     "known_rejection": known_rejected,
-
     "near_rejection": near_rejected,
-
     "far_rejection": far_rejected,
-
     "near_auroc": near_auroc,
-
     "far_auroc": far_auroc,
-
     "all_auroc": all_auroc
 }
 
@@ -556,13 +574,13 @@ os.makedirs(
     exist_ok=True
 )
 
+
 torch.save(
     results,
-    "task4/results/proser_results.pt"
+    RESULTS_PATH
 )
 
 
 print(
-    "Saved results to "
-    "task4/results/proser_results.pt"
+    f"\nSaved results to {RESULTS_PATH}"
 )

@@ -6,7 +6,8 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Subset
 from torchvision import datasets, transforms, models
-from sklearn.model_selection import train_test_split, roc_auc_score
+from sklearn.metrics import roc_auc_score
+from sklearn.model_selection import train_test_split
 
 SEED = 6304
 
@@ -21,8 +22,8 @@ device = torch.device(
 
 print("Device:", device)
 
-CHECKPOINT_PATH = "task4/checkpoints/vanilla_best.pth"
-OUTPUT_DIR = "task4/cache"
+CHECKPOINT_PATH = "task4/models/vanilla_best.pth"
+OUTPUT_DIR = "task4/models"
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -31,14 +32,14 @@ eval_transform = transforms.Compose([
 ])
 
 full_train_dataset = datasets.CIFAR10(
-    root="data",
+    root="common/datasets/CIFAR10",
     train=True,
     download=True,
     transform=eval_transform,
 )
 
 test_dataset = datasets.CIFAR10(
-    root="data",
+    root="common/datasets/CIFAR10",
     train=False,
     download=True,
     transform=eval_transform,
@@ -65,7 +66,7 @@ val_dataset = Subset(
 )
 
 cifar100_dataset = datasets.CIFAR100(
-    root="data",
+    root="common/datasets/CIFAR100",
     train=False,
     download=True,
     transform=eval_transform,
@@ -170,6 +171,7 @@ def forward_features(model, x):
 checkpoint = torch.load(
     CHECKPOINT_PATH,
     map_location=device,
+    weights_only = False
 )
 
 if "model_state_dict" in checkpoint:
@@ -228,31 +230,6 @@ def extract_outputs(model, dataset):
         torch.cat(all_labels),
     )
 
-train_data = torch.load(
-    os.path.join(OUTPUT_DIR, "cifar10_train.pt"),
-    weights_only=False
-)
-
-val_data = torch.load(
-    os.path.join(OUTPUT_DIR, "cifar10_val.pt"),
-    weights_only=False
-)
-
-test_data = torch.load(
-    os.path.join(OUTPUT_DIR, "cifar10_test.pt"),
-    weights_only=False
-)
-
-near_data = torch.load(
-    os.path.join(OUTPUT_DIR, "cifar100_near.pt"),
-    weights_only=False
-)
-
-far_data = torch.load(
-    os.path.join(OUTPUT_DIR, "cifar100_far.pt"),
-    weights_only=False
-)
-
 datasets_to_extract = {
     "cifar10_train": train_dataset,
     "cifar10_val": val_dataset,
@@ -295,6 +272,32 @@ for name, dataset in datasets_to_extract.items():
 
 
 print("\nFeature/logit extraction complete.")
+
+train_data = torch.load(
+    os.path.join(OUTPUT_DIR, "cifar10_train.pt"),
+    weights_only=False
+)
+
+val_data = torch.load(
+    os.path.join(OUTPUT_DIR, "cifar10_val.pt"),
+    weights_only=False
+)
+
+test_data = torch.load(
+    os.path.join(OUTPUT_DIR, "cifar10_test.pt"),
+    weights_only=False
+)
+
+near_data = torch.load(
+    os.path.join(OUTPUT_DIR, "cifar100_near.pt"),
+    weights_only=False
+)
+
+far_data = torch.load(
+    os.path.join(OUTPUT_DIR, "cifar100_far.pt"),
+    weights_only=False
+)
+
 
 print("\nCalculating novelty scores...")
 
@@ -416,8 +419,6 @@ for name, data in scores.items():
     print("  MLS:          ", data["mls"].shape)
     print("  Energy:       ", data["energy"].shape)
     print("  Mahalanobis:  ", data["mahalanobis"].shape)
-
-torch.save(scores, score_path)
 
 print("\nEvaluating novelty scores...")
 
